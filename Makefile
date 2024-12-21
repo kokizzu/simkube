@@ -1,110 +1,110 @@
-GO_ARTIFACTS=sk-cloudprov sk-vnode
-RUST_ARTIFACTS=sk-ctrl sk-driver sk-tracer
-ARTIFACTS ?= $(GO_ARTIFACTS) $(RUST_ARTIFACTS)
+ARTIFACTS ?= sk-ctrl sk-driver sk-tracer
 
 COVERAGE_DIR=$(BUILD_DIR)/coverage
-GO_COVER_FILE=$(COVERAGE_DIR)/go-coverage.txt
 CARGO_HOME_ENV=CARGO_HOME=$(BUILD_DIR)/cargo
 
-ifdef WITH_COVERAGE
+ifdef IN_CI
 CARGO_TEST_PREFIX=$(CARGO_HOME_ENV) CARGO_INCREMENTAL=0 RUSTFLAGS='-Cinstrument-coverage' LLVM_PROFILE_FILE='$(BUILD_DIR)/coverage/cargo-test-%p-%m.profraw'
 RUST_COVER_TYPE ?= lcov
+DOCKER_ARGS=
 else
-CARGO_TEST_PREFIX=$(CARGO_HOME_ENV)
 RUST_COVER_TYPE=markdown
+DOCKER_ARGS=-it --init
 endif
 
 RUST_COVER_FILE=$(COVERAGE_DIR)/rust-coverage.$(RUST_COVER_TYPE)
+APP_VERSION=$(shell tomlq -r .workspace.package.version Cargo.toml)
 
 include build/base.mk
 include build/k8s.mk
 
+RUST_BUILD_IMAGE ?= rust:1.79-bullseye
+
+main:
+	docker run $(DOCKER_ARGS) -u `id -u`:`id -g` -w /build -v `pwd`:/build:rw -v $(BUILD_DIR):/build/.build:rw $(RUST_BUILD_IMAGE) make build-docker
+
+extra: skctl
+
+# This is sorta subtle; the three "main" artifacts get built inside docker containers
+# to ensure that they are built against the right libs that they'll be running on in
+# the cluster.  So for those we share CARGO_HOME_ENV, which needs to be in $(BUILD_DIR)
+# so we have a known location for it.  This is _not_ built in a docker container so that
+# because it's designed to run on the user's machine, so we don't use the custom CARGO_HOME_ENV
 skctl:
-	CGO_ENABLED=0 go build -trimpath -o $(BUILD_DIR)/skctl ./cli/
+	cargo build --target-dir=$(BUILD_DIR) -p=skctl --color=always
+	cp $(BUILD_DIR)/debug/skctl $(BUILD_DIR)/.
 
-$(GO_ARTIFACTS):
-	CGO_ENABLED=0 go build -trimpath -o $(BUILD_DIR)/$@ ./$(subst sk-,,$(@))/cmd/
+pre-image:
+	cp -r examples/metrics $(BUILD_DIR)/metrics-cfg
 
-RUST_BUILD_IMAGE ?= rust:buster
+build-docker:
+	$(CARGO_HOME_ENV) cargo build --target-dir=$(BUILD_DIR) $(addprefix -p=,$(ARTIFACTS)) --color=always
+	cp $(addprefix $(BUILD_DIR)/debug/,$(ARTIFACTS)) $(BUILD_DIR)/.
 
-$(RUST_ARTIFACTS):
-	mkdir -p .build
-	docker run -u `id -u`:`id -g` -w /build -v `pwd`:/build:ro -v $(BUILD_DIR):/build/.build:rw $(RUST_BUILD_IMAGE) make $@-docker
+test: unit itest
 
-%-docker:
-	$(CARGO_HOME_ENV) cargo build --target-dir=$(BUILD_DIR) --bin=$* --color=always
-	cp $(BUILD_DIR)/debug/$* $(BUILD_DIR)/.
-
-lint:
-	$(CARGO_HOME_ENV) cargo +nightly fmt
-	$(CARGO_HOME_ENV) cargo clippy
-	golangci-lint run
-
-test: test-go test-rust itest-rust
-
-.PHONY: test-go
-test-go:
-	mkdir -p $(BUILD_DIR)/coverage
-	go test -coverprofile=$(GO_COVER_FILE) ./...
-
-.PHONY: test-rust
-test-rust:
+.PHONY: unit
+unit:
 	mkdir -p $(BUILD_DIR)/coverage
 	rm -f $(BUILD_DIR)/coverage/*.profraw
-	$(CARGO_TEST_PREFIX) cargo test --features=testutils $(CARGO_TEST) $(patsubst %, --bin %, $(RUST_ARTIFACTS)) --lib -- --nocapture --skip itest
+	$(CARGO_TEST_PREFIX) cargo test $(CARGO_TEST) --features testutils -- --skip itest
 
-.PHONY: itest-rust
-itest-rust:
-	$(CARGO_TEST_PREFIX) cargo test --features=testutils itest --lib -- --nocapture
+.PHONY: itest
+itest:
+	$(CARGO_TEST_PREFIX) cargo test itest --features testutils -- --nocapture --test-threads=1
 
-cover: cover-go cover-rust
+lint:
+	pre-commit run --all
 
-.PHONY: cover-go
-cover-go:
-	go tool cover -func=$(GO_COVER_FILE)
-
-.PHONY: cover-rust
-cover-rust:
+cover:
 	grcov . --binary-path $(BUILD_DIR)/debug/deps -s . -t $(RUST_COVER_TYPE) -o $(RUST_COVER_FILE) --branch \
 		--ignore '../*' \
 		--ignore '/*' \
 		--ignore '*/tests/*' \
 		--ignore '*_test.rs' \
+		--ignore 'sk-api/*' \
 		--ignore '*/testutils/*' \
-		--ignore '*/rust/api/v1/*' \
-		--ignore '.build/cargo/*' \
-		--ignore 'hack/*' \
+		--ignore '.build/*' \
 		--excl-line '#\[derive' \
 		--excl-start '#\[cfg\((test|feature = "testutils")'
 	@if [ "$(RUST_COVER_TYPE)" = "markdown" ]; then cat $(RUST_COVER_FILE); fi
 
+.PHONY: release publish
+release: NEW_APP_VERSION=$(subst v,,$(shell git cliff --bumped-version))
+release:
+	cargo set-version $(NEW_APP_VERSION)
+	git cliff -u --tag $(NEW_APP_VERSION) --prepend CHANGELOG.md
+	make kustomize
+	git commit -a -m "release: version v$(NEW_APP_VERSION)" && \
+		git tag v$(NEW_APP_VERSION)
+
+publish:
+	cargo ws publish --publish-as-is
+
 .PHONY: crd
-crd:
-	controller-gen crd object paths=./lib/go/api/v1/... output:artifacts:config=./k8s/raw
-	kopium -f k8s/raw/simkube.io_simulationroots.yaml > lib/rust/api/v1/simulation_roots.rs
-	kopium -f k8s/raw/simkube.io_simulations.yaml > lib/rust/api/v1/simulations.rs
+crd: skctl
+	$(BUILD_DIR)/skctl crd > k8s/raw/simkube.io_simulations.yml
+
+pre-k8s:: crd
+
+.PHONY: validation_rules
+validation_rules: VALIDATION_FILE=sk-cli/src/validation/rules/README.md
+validation_rules: skctl
+	printf "# SimKube Trace Validation Checks\n\n" > $(VALIDATION_FILE)
+	$(BUILD_DIR)/skctl validate print --format table >> $(VALIDATION_FILE)
+	printf "\nThis file is auto-generated; to rebuild, run \`make $@\`.\n" >> $(VALIDATION_FILE)
 
 .PHONY: api
 api:
-	openapi-generator generate -i api/v1/simkube.yml -g go -o generated-api
-	openapi-generator generate -i api/v1/simkube.yml -g rust --global-property models -o generated-api
-	cp generated-api/model_export_filters.go lib/go/api/v1/export_filters.go
-	cp generated-api/model_export_request.go lib/go/api/v1/export_request.go
-	cp generated-api/utils.go lib/go/api/v1/utils.go
-	cp generated-api/src/models/export_filters.rs lib/rust/api/v1/.
-	cp generated-api/src/models/export_request.rs lib/rust/api/v1/.
+	openapi-generator generate -i sk-api/schema/v1/simkube.yml -g rust --global-property models -o generated-api
+	cp generated-api/src/models/export_filters.rs sk-api/src/v1/.
+	cp generated-api/src/models/export_request.rs sk-api/src/v1/.
 	@echo ''
 	@echo '----------------------------------------------------------------------'
 	@echo 'WARNING: YOU NEED TO DO MANUAL CLEANUP TO THE OPENAPI GENERATED FILES!'
 	@echo '----------------------------------------------------------------------'
 	@echo 'At a minimum:'
-	@echo '1. In lib/go/api/v1/*, replace all the k8s-generated types with the'
-	@echo '   correct imports from the k8s api'
-	@echo '2. In lib/go/api/v1/*, change the package name from "openapi" to "v1"'
-	@echo '3. In lib/go/api/v1/*, make sure you annotate the generated objects'
-	@echo '   with "//+kubebuilder:object:generate=false" so that controller-gen'
-	@echo '   does not get confused.'
-	@echo '4. In lib/rust/api/v1/*, add "use super::*", and replace all the'
+	@echo '   In sk-api/src/v1/*, add "use super::*", and replace all the'
 	@echo '   k8s-generated types with the correct imports from k8s-openapi'
 	@echo '----------------------------------------------------------------------'
 	@echo 'CHECK THE DIFF CAREFULLY!!!'

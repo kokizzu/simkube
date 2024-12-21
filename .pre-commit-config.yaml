@@ -1,18 +1,16 @@
+---
 repos:
-  - repo: https://github.com/pre-commit/pre-commit-hooks
+  - repo: "https://github.com/pre-commit/pre-commit-hooks"
     rev: v4.4.0
     hooks:
       - id: end-of-file-fixer
-      - id: check-yaml
-        args: ["--allow-multiple-documents"]
       - id: trailing-whitespace
-  - repo: https://github.com/TekWizely/pre-commit-golang
-    rev: v1.0.0-rc.1
+  - repo: "https://github.com/adrienverge/yamllint"
+    rev: v1.35.1
     hooks:
-      - id: go-fmt
-        args: ["-w"]
-      - id: golangci-lint-mod
-  - repo: https://github.com/doublify/pre-commit-rust
+      - id: yamllint
+        args: ['--strict']
+  - repo: "https://github.com/doublify/pre-commit-rust"
     rev: v1.0
     hooks:
       - id: cargo-check
@@ -25,17 +23,33 @@ repos:
           - /tmp/cargo
           - --
           - -Dwarnings
-  - repo: https://github.com/futuretech6/pre-commit-rust-nightly
+  - repo: "https://github.com/futuretech6/pre-commit-rust-nightly"
     rev: v1.1
     hooks:
       - id: fmt
         name: rust-fmt
         args: ['--', '--unstable-features']
-  - repo: https://github.com/asottile/reorder-python-imports
-    rev: v3.10.0
+  - repo: "https://github.com/pre-commit/mirrors-mypy"
+    rev: v1.4.1
     hooks:
-      - id: reorder-python-imports
-  - repo: https://github.com/PyCQA/flake8
-    rev: 6.0.0
+      - id: mypy
+  - repo: "https://github.com/astral-sh/ruff-pre-commit"
+    rev: v0.4.2
     hooks:
-      - id: flake8
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+  - repo: local
+    hooks:
+      - id: check-k8s
+        name: Check Generated K8s YAML
+        language: system
+        entry: bash -c 'make kustomize && git diff --quiet'
+        pass_filenames: false
+        files: "sk-api/.*|k8s/.*|Cargo.toml"
+      - id: check-validation-readme
+        name: Check Validation README
+        language: system
+        entry: bash -c 'make validation_rules && git diff --quiet'
+        pass_filenames: false
+        files: "sk-cli/src/validation/.*"

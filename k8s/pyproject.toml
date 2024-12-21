@@ -1,17 +1,29 @@
 [tool.poetry]
-name = "manifests"
-version = "0.1.0"
-description = ""
 authors = ["David Morrison <drmorr@appliedcomputing.io>"]
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.11"
-cdk8s = "^2.24.0"
-fireconfig = { git = "https://github.com/acrlabs/fireconfig", tag = "v0.2.2" }
+cdk8s = "^2"
+fireconfig = { git = "https://github.com/acrlabs/fireconfig", tag = "v0.5.4" }
 
 [tool.poetry.group.dev.dependencies]
-mypy = "^1.4.1"
+mypy = "^1"
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 120
+preview = true
+
+[tool.ruff.lint]
+ignore = ["PLR2004", "PLR0913", "PLR0917"]
+select = ["E", "F", "I", "W", "PL"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402"]
+
+[tool.ruff.lint.isort]
+force-single-line = true
